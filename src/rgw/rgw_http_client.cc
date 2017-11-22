@@ -238,6 +238,37 @@ void RGWHTTPClient::_set_read_paused(bool pause)
   }
 }
 
+/*
+ * make attrs Look-Like-This
+ * converts underscores to dashes
+ */
+static string camelcase_dash_http_attr(const string& orig)
+{
+  const char *s = orig.c_str();
+  char buf[orig.size() + 1];
+  buf[orig.size()] = '\0';
+
+  bool last_sep = true;
+
+  for (size_t i = 0; i < orig.size(); ++i, ++s) {
+    switch (*s) {
+      case '_':
+      case '-':
+        buf[i] = '-';
+        last_sep = true;
+        break;
+      default:
+        if (last_sep) {
+          buf[i] = toupper(*s);
+        } else {
+          buf[i] = tolower(*s);
+        }
+        last_sep = false;
+    }
+  }
+  return string(buf);
+}
+
 static curl_slist *headers_to_slist(param_vec_t& headers)
 {
   curl_slist *h = NULL;
@@ -250,6 +281,8 @@ static curl_slist *headers_to_slist(param_vec_t& headers)
     if (strncmp(val.c_str(), "HTTP_", 5) == 0) {
       val = val.substr(5);
     }
+
+    val = camelcase_dash_http_attr(val);
 
     /* we need to convert all underscores into dashes as some web servers forbid them
      * in the http header field names
