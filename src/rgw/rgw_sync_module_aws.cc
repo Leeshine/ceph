@@ -811,7 +811,7 @@ public:
                                                   sync_env->http_manager,
                                                   target_bucket_name, nullptr, bl, nullptr));
         }
-        if (retcode < 0) {
+        if (retcode < 0 && retcode != -ENOLCK) {
           return set_cr_error(retcode);
         }
 
