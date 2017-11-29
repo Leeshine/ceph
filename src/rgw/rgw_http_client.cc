@@ -370,6 +370,10 @@ int RGWHTTPClient::init_request(rgw_http_req_data *_req_data, bool send_data_hin
   }
   if (has_send_len) {
     curl_easy_setopt(easy_handle, CURLOPT_INFILESIZE, (void *)send_len); 
+    h = curl_slist_append(h, "Transfer-Encoding:");
+    stringstream ss;
+    ss << "Content-Length: " << send_len;
+    h = curl_slist_append(h, ss.str().c_str());
   }
   if (!verify_ssl) {
     curl_easy_setopt(easy_handle, CURLOPT_SSL_VERIFYPEER, 0L);

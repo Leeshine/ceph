@@ -702,7 +702,9 @@ int RGWRESTStreamRWRequest::do_send_prepare(RGWAccessKey *key, map<string, strin
   if (send_data) {
     set_outbl(*send_data);
     send_data_hint = true;
+    set_send_length(send_data->length());
   }
+  
 
   method = new_info.method;
   url = new_url;
