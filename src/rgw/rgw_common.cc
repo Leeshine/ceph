@@ -1448,23 +1448,22 @@ static bool char_needs_url_encoding(char c)
   return false;
 }
 
-void url_encode(const string& src, string& dst)
+void url_encode(const string& src, string& dst, bool encodeSlash)
 {
   const char *p = src.c_str();
   for (unsigned i = 0; i < src.size(); i++, p++) {
-    if (char_needs_url_encoding(*p)) {
+    if ((!encodeSlash && *p == 0x2F) || !char_needs_url_encoding(*p)) {
+      dst.append(p, 1);
+    }else {
       rgw_uri_escape_char(*p, dst);
-      continue;
     }
-
-    dst.append(p, 1);
   }
 }
 
-std::string url_encode(const std::string& src)
+std::string url_encode(const std::string& src, bool encodeSlash)
 {
   std::string dst;
-  url_encode(src, dst);
+  url_encode(src, dst, encodeSlash);
 
   return dst;
 }
