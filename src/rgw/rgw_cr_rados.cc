@@ -98,6 +98,36 @@ RGWAsyncGetSystemObj::RGWAsyncGetSystemObj(RGWCoroutine *caller, RGWAioCompletio
 {
 }
 
+RGWAsyncGetOmapKeys::RGWAsyncGetOmapKeys(RGWCoroutine* caller, RGWAioCompletionNotifier *cn, RGWRados *_store, RGWObjectCtx *_obj_ctx,
+                      const rgw_raw_obj& _obj, const string& _marker, uint64_t _max_entries, map<string, bufferlist>& _entries) : RGWAsyncRadosRequest(caller, cn),
+                      store(_store), obj_ctx(_obj_ctx), obj(_obj), marker(_marker), max_entries(_max_entries), entries(_entries)
+{
+}
+
+int RGWAsyncGetOmapKeys::_send_request()
+{
+  bufferlist header;
+  if (max_entries == 0) {
+    return store->omap_get_all(obj, header, entries);
+  }
+  return store->omap_get_vals(obj, header, marker, max_entries, entries);
+}
+
+int RGWSimpleOmapKeysReadCR::send_request()
+{
+  req = new RGWAsyncGetOmapKeys(this, stack->create_completion_notifier(),
+                store, &obj_ctx, obj,
+                marker, max_entries, entries);
+
+  async_rados->queue(req);
+  return 0;
+}
+
+int RGWSimpleOmapKeysReadCR::request_complete()
+{
+  return req->get_ret_status();
+}
+
 int RGWSimpleRadosReadAttrsCR::send_request()
 {
   req = new RGWAsyncGetSystemObj(this, stack->create_completion_notifier(),

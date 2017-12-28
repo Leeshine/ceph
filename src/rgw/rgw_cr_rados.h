@@ -119,6 +119,22 @@ public:
   void set_read_attrs(map<string, bufferlist> *_pattrs) { pattrs = _pattrs; }
 };
 
+class RGWAsyncGetOmapKeys : public RGWAsyncRadosRequest {
+  RGWRados *store;
+  RGWObjectCtx *obj_ctx;
+  RGWRados::SystemObject::Read::GetObjState read_state;
+  rgw_raw_obj obj;
+  string marker;
+  uint64_t max_entries;
+  map<string, bufferlist>& entries;
+protected:
+  int _send_request() override;
+public:
+  RGWAsyncGetOmapKeys(RGWCoroutine *caller, RGWAioCompletionNotifier *cn, RGWRados *_store, RGWObjectCtx *_obj_ctx,
+                       const rgw_raw_obj& _obj, const string& _marker, uint64_t _max_entries, 
+                       map<string, bufferlist>& _entries);
+};
+
 class RGWAsyncPutSystemObj : public RGWAsyncRadosRequest {
   RGWRados *store;
   RGWObjVersionTracker *objv_tracker;
@@ -220,6 +236,42 @@ public:
   virtual int handle_data(T& data) {
     return 0;
   }
+};
+
+class RGWSimpleOmapKeysReadCR : public RGWSimpleCoroutine {
+  RGWAsyncRadosProcessor *async_rados;
+  RGWRados *store;
+  RGWObjectCtx obj_ctx;
+
+  rgw_raw_obj obj;
+
+  string marker;
+  map<string,bufferlist>& entries;
+  uint64_t max_entries;
+
+ RGWAsyncGetOmapKeys *req{nullptr};
+
+public:
+  RGWSimpleOmapKeysReadCR(RGWAsyncRadosProcessor *_async_rados, RGWRados *_store,
+         const rgw_raw_obj& _obj, uint64_t _max_entries,
+          const string& _marker, map<string, bufferlist>& _entries)
+    : RGWSimpleCoroutine(_store->ctx()), async_rados(_async_rados), store(_store),
+      obj_ctx(store), obj(_obj),
+     marker(_marker), entries(_entries), max_entries(_max_entries) 
+      {}
+  ~RGWSimpleOmapKeysReadCR() override {
+    request_cleanup();
+  }
+
+  void request_cleanup() override {
+    if (req) {
+      req->finish();
+      req = NULL;
+    }
+  }
+
+  int send_request() override;
+  int request_complete() override;
 };
 
 template <class T>
