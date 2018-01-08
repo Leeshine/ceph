@@ -338,6 +338,99 @@ public:
   }
 };
 
+class RGWReadRemoteDataLogCR : public RGWShardCollectCR {
+  static constexpr int MAX_CONCURRENT_SHARDS = 16;
+  RGWDataSyncEnv *env;
+
+  map<int, string> shards;
+  
+  map<int, list<rgw_data_change_log_entry>>& log_entries_map;
+  bool truncated;
+  map<int, string>::iterator iter;
+
+ public:
+  RGWReadRemoteDataLogCR(RGWDataSyncEnv *env, map<int, string>& _shards,
+      map<int, list<rgw_data_change_log_entry>>& _log_entries_map)
+    : RGWShardCollectCR(env->cct, MAX_CONCURRENT_SHARDS), env(env),
+    log_entries_map(_log_entries_map), truncated(false)
+  {
+    shards.swap(_shards);
+    iter = shards.begin();
+  }
+  bool spawn_next() override;
+};
+
+bool RGWReadRemoteDataLogCR::spawn_next()
+{
+  if (iter == shards.end()) {
+    return false;
+  }
+  spawn(new RGWReadRemoteDataLogShardCR(env, iter->first, &iter->second, &log_entries_map[iter->first], &truncated), false);
+
+  ++iter;
+  return true;
+}
+
+class RGWReadLaggingBucketsCoroutine : public RGWCoroutine {
+  RGWDataSyncEnv *sync_env;
+  rgw_data_sync_status *sync_status;
+
+  map<int, string> shard_markers;
+  set<int> error_shards;
+  int max_error_entries{0}; // read all entries
+
+  map<int, list<rgw_data_change_log_entry>> log_entries_map;
+  map<int, map<string, bufferlist>> entries_map;
+
+public:
+  RGWReadLaggingBucketsCoroutine(RGWDataSyncEnv *_sync_env, rgw_data_sync_status *_status,
+      map<int, string>& _shard_markers, set<int>& _error_shards)
+    : RGWCoroutine(_sync_env->cct), sync_env(_sync_env), sync_status(_status)
+  {
+    shard_markers.swap(_shard_markers);
+    error_shards.swap(_error_shards);
+  }
+  int operate() override;
+};
+
+int RGWReadLaggingBucketsCoroutine::operate()
+{
+  reenter(this) {
+    // read remote data logs
+    yield call(new RGWReadRemoteDataLogCR(sync_env, shard_markers, log_entries_map));
+
+    if (retcode < 0) {
+      ldout(sync_env->cct, 4) << "failed to list remote data log"
+        << cpp_strerror(retcode) << dendl;
+      return set_cr_error(retcode);
+    }
+    for (auto& entry : log_entries_map) {
+      list<rgw_data_change_log_entry> log_entries = entry.second;
+      for (auto& log_iter : log_entries) {
+        sync_status->lagging_buckets.insert(log_iter.entry.key);
+      }
+    }
+    //read error buckets
+    using ReadErrorShardsCR = RGWReadDataSyncErrorShardsCR;
+    yield call(new ReadErrorShardsCR(sync_env, max_error_entries, error_shards, entries_map));
+
+    if (retcode < 0) {
+      ldout(sync_env->cct, 4) << "failed to read sync error shards with "
+        << cpp_strerror(retcode) << dendl;
+      return set_cr_error(retcode);
+    }
+    for (auto& entry : entries_map) {
+      map<string, bufferlist> error_entries = entry.second;
+      for (auto& iter : error_entries) {
+        sync_status->lagging_buckets.insert(iter.first);
+      }
+    }
+
+    return set_cr_done();
+  }
+  return 0;
+}
+
 class RGWReadRemoteDataLogInfoCR : public RGWShardCollectCR {
   RGWDataSyncEnv *sync_env;
 
@@ -668,6 +761,23 @@ int RGWRemoteDataLog::read_sync_status(rgw_data_sync_status *sync_status)
   RGWDataSyncEnv sync_env_local = sync_env;
   sync_env_local.http_manager = &http_manager;
   ret = crs.run(new RGWReadDataSyncStatusCoroutine(&sync_env_local, sync_status));
+  http_manager.stop();
+  return ret;
+}
+
+int RGWRemoteDataLog::read_lagging_buckets(rgw_data_sync_status *sync_status, map<int, string>& shard_markers, set<int>& error_shards)
+{
+  // cannot run concurrently with run_sync(), so run in a separate manager
+  RGWCoroutinesManager crs(store->ctx(), store->get_cr_registry());
+  RGWHTTPManager http_manager(store->ctx(), crs.get_completion_mgr());
+  int ret = http_manager.set_threaded();
+  if (ret < 0) {
+    ldout(store->ctx(), 0) << "failed in http_manager.set_theraded() ret=" << ret << dendl;
+    return ret;
+  }
+  RGWDataSyncEnv sync_env_local = sync_env;
+  sync_env_local.http_manager = &http_manager;
+  ret = crs.run(new RGWReadLaggingBucketsCoroutine(&sync_env_local, sync_status, shard_markers, error_shards));
   http_manager.stop();
   return ret;
 }

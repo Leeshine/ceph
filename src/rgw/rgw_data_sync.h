@@ -156,6 +156,8 @@ struct rgw_data_sync_status {
   rgw_data_sync_info sync_info;
   map<uint32_t, rgw_data_sync_marker> sync_markers;
 
+  set<string> lagging_buckets;
+
   rgw_data_sync_status() {}
 
   void encode(bufferlist& bl) const {
@@ -280,6 +282,7 @@ public:
   int read_source_log_shards_info(map<int, RGWDataChangesLogInfo> *shards_info);
   int read_source_log_shards_next(map<int, string> shard_markers, map<int, rgw_datalog_shard_data> *result);
   int read_sync_status(rgw_data_sync_status *sync_status);
+  int read_lagging_buckets(rgw_data_sync_status *sync_status, map<int, string>& shard_markers, set<int>& error_shards);
   int init_sync_status(int num_shards);
   int run_sync(int num_shards);
 
@@ -322,6 +325,10 @@ public:
 
   int read_sync_status(rgw_data_sync_status *sync_status) {
     return source_log.read_sync_status(sync_status);
+  }
+
+  int read_lagging_buckets(rgw_data_sync_status *sync_status, map<int, string>& shard_markers, set<int>& error_shards) {
+    return source_log.read_lagging_buckets(sync_status, shard_markers, error_shards);
   }
   int init_sync_status() { return source_log.init_sync_status(num_shards); }
 
