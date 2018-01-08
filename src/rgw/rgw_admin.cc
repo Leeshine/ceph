@@ -2045,7 +2045,7 @@ static void get_md_sync_status(list<string>& status)
   flush_ss(ss, status);
 }
 
-static void get_data_sync_status(const string& source_zone, list<string>& status, int tab)
+static void get_data_sync_status(const string& source_zone, list<string>& status, int tab, bool sync_detail)
 {
   stringstream ss;
 
@@ -2195,6 +2195,27 @@ static void get_data_sync_status(const string& source_zone, list<string>& status
     }
   }
 
+  if (sync_detail) {
+    ret = sync.read_lagging_buckets(&sync_status, shards_behind, error_shards); // read error shards
+    if (ret < 0 && ret != -ENOENT) {
+      push_ss(ss, status, tab) << string("failed read lagging buckets: ") + cpp_strerror(-ret);
+      return;
+    }
+    set<string> lagging_buckets = sync_status.lagging_buckets;
+    if (lagging_buckets.size() > 0) {
+      push_ss(ss, status,tab) << "data is lagging on " << lagging_buckets.size() << " buckets";
+     string lagging_str = "lagging buckets: ";
+     set<string>::iterator iter = lagging_buckets.begin();
+      push_ss(ss, status, tab) << lagging_str << *iter;
+     ++iter;
+
+     int new_tab = tab + lagging_str.size();
+     for (; iter != lagging_buckets.end(); ++iter) {
+       push_ss(ss, status, new_tab) << *iter;
+     }
+    }
+  }
+
   flush_ss(ss, status);
 }
 
@@ -2209,7 +2230,7 @@ static void tab_dump(const string& header, int width, const list<string>& entrie
 }
 
 
-static void sync_status(Formatter *formatter)
+static void sync_status(Formatter *formatter, bool sync_detail)
 {
   RGWRealm& realm = store->realm;
   RGWZoneGroup& zonegroup = store->get_zonegroup();
@@ -2242,7 +2263,7 @@ static void sync_status(Formatter *formatter)
       s += string(" (") + siter->second.name + ")";
     }
     data_status.push_back(s);
-    get_data_sync_status(source_id, data_status, source_str.size());
+    get_data_sync_status(source_id, data_status, source_str.size(), sync_detail);
   }
 
   tab_dump("data sync", width, data_status);
@@ -2470,6 +2491,7 @@ int main(int argc, const char **argv)
   int include_all = false;
 
   int sync_stats = false;
+  int sync_detail = false;
   int bypass_gc = false;
   int warnings_only = false;
   int inconsistent_index = false;
@@ -2705,6 +2727,8 @@ int main(int argc, const char **argv)
     } else if (ceph_argparse_binary_flag(args, i, &check_objects, NULL, "--check-objects", (char*)NULL)) {
      // do nothing
     } else if (ceph_argparse_binary_flag(args, i, &sync_stats, NULL, "--sync-stats", (char*)NULL)) {
+     // do nothing
+    } else if (ceph_argparse_binary_flag(args, i, &sync_detail, NULL, "--sync-detail", (char*)NULL)) {
      // do nothing
     } else if (ceph_argparse_binary_flag(args, i, &include_all, NULL, "--include-all", (char*)NULL)) {
      // do nothing
@@ -6356,7 +6380,7 @@ next:
   }
 
   if (opt_cmd == OPT_SYNC_STATUS) {
-    sync_status(formatter);
+    sync_status(formatter, sync_detail);
   }
 
   if (opt_cmd == OPT_METADATA_SYNC_STATUS) {
