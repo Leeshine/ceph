@@ -768,7 +768,7 @@ class RGWListBucketInstanceInfoCR : public RGWCoroutine {
   }
 };
 
-class RGWListBucketIndexesCR : public RGWCoroutine {
+class RGWBuildFullSyncMapsCR : public RGWCoroutine {
   RGWDataSyncEnv *sync_env;
 
   RGWRados *store;
@@ -779,14 +779,13 @@ class RGWListBucketIndexesCR : public RGWCoroutine {
   int req_ret;
   int ret;
 
-  list<string> result;
-  list<string>::iterator iter;
-
   RGWShardedOmapCRManager *entries_index;
+
+  map<string, bucket_instance_meta_info> instance_entries;
+  map<string, bucket_instance_meta_info>::iterator iter;
 
   string oid_prefix;
 
-  string path;
   bucket_instance_meta_info meta_info;
   string key;
   string s;
@@ -795,45 +794,32 @@ class RGWListBucketIndexesCR : public RGWCoroutine {
   bool failed;
 
 public:
-  RGWListBucketIndexesCR(RGWDataSyncEnv *_sync_env,
+  RGWBuildFullSyncMapsCR(RGWDataSyncEnv *_sync_env,
                          rgw_data_sync_status *_sync_status) : RGWCoroutine(_sync_env->cct), sync_env(_sync_env),
                                                       store(sync_env->store), sync_status(_sync_status),
 						      req_ret(0), ret(0), entries_index(NULL), i(0), failed(false) {
     oid_prefix = datalog_sync_full_sync_index_prefix + "." + sync_env->source_zone; 
-    path = "/admin/metadata/bucket.instance";
     num_shards = sync_status->sync_info.num_shards;
   }
-  ~RGWListBucketIndexesCR() override {
+  ~RGWBuildFullSyncMapsCR() override {
     delete entries_index;
   }
 
   int operate() override {
     reenter(this) {
-      yield {
-        string entrypoint = string("/admin/metadata/bucket.instance");
-        /* FIXME: need a better scaling solution here, requires streaming output */
-        call(new RGWReadRESTResourceCR<list<string> >(store->ctx(), sync_env->conn, sync_env->http_manager,
-                                                      entrypoint, NULL, &result));
-      }
+      entries_index = new RGWShardedOmapCRManager(sync_env->async_rados, store, this, num_shards, store->get_zone_params().log_pool, oid_prefix);
+
+      yield call(new RGWListBucketInstanceInfoCR(sync_env, instance_entries));
+
       if (retcode < 0) {
-        ldout(sync_env->cct, 0) << "ERROR: failed to fetch metadata for section bucket.instance" << dendl;
+        ldout(sync_env->cct, 0) << "ERROR: failed to list remote bucket instance metainfo: "
+          << cpp_strerror(retcode) << dendl;
         return set_cr_error(retcode);
       }
-      entries_index = new RGWShardedOmapCRManager(sync_env->async_rados, store, this, num_shards,
-						  store->get_zone_params().log_pool,
-                                                  oid_prefix);
-      yield; // yield so OmapAppendCRs can start
-      for (iter = result.begin(); iter != result.end(); ++iter) {
-        ldout(sync_env->cct, 20) << "list metadata: section=bucket.instance key=" << *iter << dendl;
 
-        key = *iter;
-
-        yield {
-          rgw_http_param_pair pairs[] = { { "key", key.c_str() },
-                                          { NULL, NULL } };
-
-          call(new RGWReadRESTResourceCR<bucket_instance_meta_info>(store->ctx(), sync_env->conn, sync_env->http_manager, path, pairs, &meta_info));
-        }
+      for (iter = instance_entries.begin(); iter != instance_entries.end(); ++iter) {
+        key = iter->first;
+        meta_info = iter->second;
 
         num_shards = meta_info.data.get_bucket_info().num_shards;
         if (num_shards > 0) {
@@ -847,6 +833,7 @@ public:
           yield entries_index->append(key, store->data_log->get_log_shard_id(meta_info.data.get_bucket_info().bucket, -1));
         }
       }
+
       yield {
         if (!entries_index->finish()) {
           failed = true;
@@ -1636,7 +1623,7 @@ public:
           return set_cr_error(retcode);
         }
         /* state: building full sync maps */
-        yield call(new RGWListBucketIndexesCR(sync_env, &sync_status));
+        yield call(new RGWBuildFullSyncMapsCR(sync_env, &sync_status));
         if (retcode < 0) {
           tn->log(0, SSTR("ERROR: failed to build full sync maps, retcode=" << retcode));
           return set_cr_error(retcode);
