@@ -715,6 +715,59 @@ struct bucket_instance_meta_info {
   }
 };
 
+class RGWListBucketInstanceInfoCR : public RGWCoroutine {
+  RGWDataSyncEnv *sync_env;
+  RGWRados *store;
+
+  map<string, bucket_instance_meta_info>& list_result;
+
+  list<string> result;
+  list<string>::iterator iter;
+  
+  bucket_instance_meta_info meta_info;
+  string path;
+  string key;
+
+  public:
+  RGWListBucketInstanceInfoCR(RGWDataSyncEnv *_sync_env,
+                                map<string, bucket_instance_meta_info>& _list_result)
+    : RGWCoroutine(_sync_env->cct), sync_env(_sync_env), store(_sync_env->store), list_result(_list_result)
+  {
+    path = string("/admin/metadata/bucket.instance");
+  }
+
+  int operate() override {
+    reenter(this) {
+      yield{
+        call(new RGWReadRESTResourceCR<list<string> >(store->ctx(), sync_env->conn, sync_env->http_manager,
+              path, NULL, &result));
+      }
+
+      if (retcode < 0) {
+        ldout(sync_env->cct, 0) << "ERROR: failed to fetch metadata for section bucket.index" << dendl;
+        return set_cr_error(retcode);
+      }
+
+      for (iter = result.begin(); iter != result.end(); ++iter) {
+        ldout(sync_env->cct, 20) << "list metadata: section=bucket.index key=" << *iter << dendl;
+
+        key = *iter;
+
+        yield {
+          rgw_http_param_pair pairs[] = { { "key", key.c_str() },
+            { NULL, NULL } };
+
+          call(new RGWReadRESTResourceCR<bucket_instance_meta_info>(store->ctx(), sync_env->conn, sync_env->http_manager, path, pairs, &meta_info));
+        }
+
+        list_result[key] = meta_info;
+      }
+      return set_cr_done();
+    }
+    return 0;
+  }
+};
+
 class RGWListBucketIndexesCR : public RGWCoroutine {
   RGWDataSyncEnv *sync_env;
 
