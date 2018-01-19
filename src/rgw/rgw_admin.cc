@@ -234,7 +234,9 @@ void usage()
   cout << "   --start-date=<date>       start date in the format yyyy-mm-dd\n";
   cout << "   --end-date=<date>         end date in the format yyyy-mm-dd\n";
   cout << "   --bucket-id=<bucket-id>   bucket id\n";
-  cout << "   --shard-id=<shard-id>     optional for mdlog list\n";
+  cout << "   --shard-id=<shard-id>     optional for:\n";
+  cout << "                               mdlog list\n";
+  cout << "                               data sync status\n";
   cout << "                             required for: \n";
   cout << "                               mdlog trim\n";
   cout << "                               replica mdlog get/delete\n";
@@ -6444,10 +6446,25 @@ next:
     }
 
     rgw_data_sync_status sync_status;
-    ret = sync.read_sync_status(&sync_status);
-    if (ret < 0 && ret != -ENOENT) {
-      cerr << "ERROR: sync.read_sync_status() returned ret=" << ret << std::endl;
-      return -ret;
+    if (specified_shard_id) {
+      set<string> lagging_buckets;
+      rgw_data_sync_marker sync_marker;
+      ret = sync.read_shard_status(shard_id, lagging_buckets, &sync_marker);
+      if (ret < 0 && ret != -ENOENT) {
+        cerr << "ERROR: sync.read_shard_status() returned ret=" << ret << std::endl;
+        return -ret;
+      }
+      formatter->open_object_section("summary");
+      encode_json("shard_id", shard_id, formatter);
+      encode_json("marker", sync_marker, formatter);
+      encode_json("lagging_buckets", lagging_buckets, formatter);
+      formatter->close_section();
+      formatter->flush(cout);
+    }else {
+      ret = sync.read_sync_status(&sync_status);
+      if (ret < 0 && ret != -ENOENT) {
+        cerr << "ERROR: sync.read_sync_status() returned ret=" << ret << std::endl;
+        return -ret;
     }
 
     formatter->open_object_section("summary");
@@ -6472,6 +6489,7 @@ next:
     formatter->close_section();
 
     formatter->flush(cout);
+    }
   }
 
   if (opt_cmd == OPT_DATA_SYNC_INIT) {
