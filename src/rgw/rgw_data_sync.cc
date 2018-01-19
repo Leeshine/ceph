@@ -2086,6 +2086,195 @@ int RGWReadBucketSyncStatusCoroutine::operate()
   return 0;
 }
 
+class RGWReadBucketShardsStatusCR : public RGWShardCollectCR {
+  static constexpr int MAX_CONCURRENT_SHARDS = 16;
+
+  RGWDataSyncEnv *sync_env;
+
+  map<rgw_bucket_shard, rgw_bucket_shard_sync_info> &bs_sync_status;
+  map<rgw_bucket_shard, rgw_bucket_shard_sync_info>::iterator iter;
+  
+ public:
+  RGWReadBucketShardsStatusCR(RGWDataSyncEnv *_sync_env, 
+      map<rgw_bucket_shard, rgw_bucket_shard_sync_info>& _bs_sync_status)
+    : RGWShardCollectCR(_sync_env->cct, MAX_CONCURRENT_SHARDS), sync_env(_sync_env),
+    bs_sync_status(_bs_sync_status)
+  {
+    iter = bs_sync_status.begin();
+  }
+  bool spawn_next() override;
+};
+
+bool RGWReadBucketShardsStatusCR::spawn_next()
+{
+ if (iter == bs_sync_status.end()) {
+   return false;
+ }
+
+ rgw_bucket_shard bs = iter->first;
+ spawn(new RGWReadBucketSyncStatusCoroutine(sync_env, bs, &iter->second), false);
+
+  ++iter;
+  return true;
+}
+
+#define DATA_SYNC_MAX_ACTIVE_ENTRIES 10
+class RGWReadLaggingBucketShardsCoroutine : public RGWCoroutine {
+  RGWDataSyncEnv *sync_env;
+  RGWRados *store;
+  
+  map<string, bucket_instance_meta_info> instance_entries;
+  set<string>& lagging_buckets;
+  map<rgw_bucket_shard, rgw_bucket_shard_sync_info> bs_sync_status;
+
+  const int shard_id;
+  uint64_t max_entries;
+  string marker;
+  set<string> entries;
+
+  string status_oid;
+
+  int id;
+  rgw_bucket_shard_sync_info sync_info;
+  rgw_bucket_shard bs;
+
+  rgw_data_sync_marker* sync_marker;
+public:
+  RGWReadLaggingBucketShardsCoroutine(RGWDataSyncEnv *_sync_env, const int _shard_id,
+                                      set<string>& _lagging_buckets, rgw_data_sync_marker* _sync_marker) 
+  : RGWCoroutine(_sync_env->cct), sync_env(_sync_env),
+  store(sync_env->store), lagging_buckets(_lagging_buckets),
+  shard_id(_shard_id), max_entries(DATA_SYNC_MAX_ACTIVE_ENTRIES),
+  sync_marker(_sync_marker)
+  {
+    status_oid = RGWDataSyncStatusManager::shard_obj_name(sync_env->source_zone, shard_id);
+  }
+
+  int operate() override;
+};
+
+int RGWReadLaggingBucketShardsCoroutine::operate()
+{
+  reenter(this){
+    //read active bucket shards
+    do {
+      yield call(new RGWRadosGetOmapKeysCR(sync_env->store, rgw_raw_obj(sync_env->store->get_zone_params().log_pool, status_oid), 
+                                           marker, &entries, max_entries));
+      if (retcode < 0) {
+        ldout(sync_env->cct, 4) << "failed to read active bucket shards: " 
+          << cpp_strerror(retcode) << dendl;
+        return set_cr_error(retcode);
+      }
+
+      set<string>::iterator iter = entries.begin();
+      for(; iter != entries.end(); ++iter) {
+        lagging_buckets.insert(*iter);
+        marker = *iter;
+      }
+    }while((int)entries.size() == max_entries);
+
+    //list bucket instance info
+    yield call(new RGWListBucketInstanceInfoCR(sync_env, instance_entries));
+
+    if (retcode < 0) {
+      ldout(sync_env->cct,4) << "failed to list remote bucket instance metainfo " 
+        << cpp_strerror(retcode) << dendl;
+      return set_cr_error(retcode);
+    }
+
+    //read bucket shards related this data log 
+    for (const auto& entry : instance_entries) {
+      string key = entry.first;
+      bucket_instance_meta_info meta_info = entry.second;
+      int num_shards = meta_info.data.get_bucket_info().num_shards;
+
+      if (num_shards > 0) {
+        for (int id = 0; id < num_shards; ++id) {
+          char buf[16];
+          snprintf(buf, sizeof(buf), ":%d", id);
+          string s = key + buf;
+          if (lagging_buckets.find(s) != lagging_buckets.end()) {
+            continue;
+          }
+          int log_shard_id = store->data_log->get_log_shard_id(meta_info.data.get_bucket_info().bucket, id);
+          if (log_shard_id == shard_id) {
+            rgw_bucket_shard bs;
+            int ret = rgw_bucket_parse_bucket_key(sync_env->cct, s, &bs.bucket, &bs.shard_id); 
+            if (ret < 0) {
+              return set_cr_error(-EIO);
+            }
+            rgw_bucket_shard_sync_info info;
+            bs_sync_status[bs] = info;
+          }
+        }
+      }else {
+        if (lagging_buckets.find(key) != lagging_buckets.end()) {
+          continue;
+        }
+        int log_shard_id = store->data_log->get_log_shard_id(meta_info.data.get_bucket_info().bucket, -1);
+        if (log_shard_id == shard_id) {
+          rgw_bucket_shard bs;
+          int ret = rgw_bucket_parse_bucket_key(sync_env->cct,key, &bs.bucket, &bs.shard_id);
+          if (ret < 0) {
+            return set_cr_error(-EIO);
+          }
+          rgw_bucket_shard_sync_info info;
+          bs_sync_status[bs] = info;
+        }
+      }
+    }
+
+    //get bucket shards in StateInit
+    yield call(new RGWReadBucketShardsStatusCR(sync_env, bs_sync_status));
+    if (retcode < 0) {
+      ldout(sync_env->cct,4) << "failed to list bucket shards sync with " 
+        << cpp_strerror(retcode) << dendl;
+      return set_cr_error(retcode);
+    }
+
+    for (auto& ss : bs_sync_status) {
+      bs = ss.first;
+      sync_info = ss.second;
+
+      if (sync_info.state == rgw_bucket_shard_sync_info::StateInit) {
+        lagging_buckets.insert(bs.get_key());
+      }
+    }
+
+    //read sync status marker
+    using CR = RGWSimpleRadosReadCR<rgw_data_sync_marker>;
+    yield call(new CR(sync_env->async_rados, store, 
+                      rgw_raw_obj(store->get_zone_params().log_pool, RGWDataSyncStatusManager::shard_obj_name(sync_env->source_zone, shard_id)),
+                      sync_marker));
+    if (retcode < 0) {
+      ldout(sync_env->cct,4) << "failed to read sync status marker with " 
+        << cpp_strerror(retcode) << dendl;
+      return set_cr_error(retcode);
+    }
+
+    return set_cr_done();
+  }
+
+  return 0;
+}
+
+int RGWRemoteDataLog::read_shard_status(int shard_id, set<string>& lagging_buckets, rgw_data_sync_marker *sync_marker)
+{
+  // cannot run concurrently with run_sync(), so run in a separate manager
+  RGWCoroutinesManager crs(store->ctx(), store->get_cr_registry());
+  RGWHTTPManager http_manager(store->ctx(), crs.get_completion_mgr());
+  int ret = http_manager.set_threaded();
+  if (ret < 0) {
+    ldout(store->ctx(), 0) << "failed in http_manager.set_threaded() ret=" << ret << dendl;
+    return ret;
+  }
+  RGWDataSyncEnv sync_env_local = sync_env;
+  sync_env_local.http_manager = &http_manager;
+  ret = crs.run(new RGWReadLaggingBucketShardsCoroutine(&sync_env_local, shard_id, lagging_buckets, sync_marker));
+  http_manager.stop();
+  return ret;
+}
+
 RGWCoroutine *RGWRemoteBucketLog::read_sync_status_cr(rgw_bucket_shard_sync_info *sync_status)
 {
   return new RGWReadBucketSyncStatusCoroutine(&sync_env, bs, sync_status);

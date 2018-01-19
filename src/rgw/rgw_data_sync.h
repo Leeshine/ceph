@@ -283,6 +283,7 @@ public:
   int read_source_log_shards_info(map<int, RGWDataChangesLogInfo> *shards_info);
   int read_source_log_shards_next(map<int, string> shard_markers, map<int, rgw_datalog_shard_data> *result);
   int read_sync_status(rgw_data_sync_status *sync_status);
+  int read_shard_status(int shard_id, set<string>& lagging_buckets, rgw_data_sync_marker* sync_marker);
   int init_sync_status(int num_shards);
   int run_sync(int num_shards);
 
@@ -332,6 +333,11 @@ public:
   int read_sync_status(rgw_data_sync_status *sync_status) {
     return source_log.read_sync_status(sync_status);
   }
+
+  int read_shard_status(int shard_id, set<string>& lagging_buckets, rgw_data_sync_marker *sync_marker) {
+    return source_log.read_shard_status(shard_id, lagging_buckets, sync_marker);
+  }
+
   int init_sync_status() { return source_log.init_sync_status(num_shards); }
 
   int read_log_info(rgw_datalog_info *log_info) {
