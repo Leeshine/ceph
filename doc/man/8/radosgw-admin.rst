@@ -566,7 +566,7 @@ Options
 
 .. option:: --shard-id=<shard-id>
 
-	Optional for mdlog list. Required for ``mdlog trim``,
+	Optional for mdlog list, data sync status. Required for ``mdlog trim``,
 	``replica mdlog get/delete``, ``replica datalog get/delete``.
 
 .. option:: --auth-uid=auid
